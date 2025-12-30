@@ -1,0 +1,235 @@
+<!-- public/index.html -->
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Virtual Try-On → 3D</title>
+  <style>
+    body { font-family: system-ui, Arial; max-width: 900px; margin: 24px auto; }
+    .card { padding: 14px; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 12px; }
+    #preview img, #tryonPreview img { max-width: 480px; display:block; margin-top:8px; }
+    .links a { display:block; margin:6px 0; }
+  </style>
+</head>
+<body>
+  <h1>FASHN: Virtual Try-On v1.6 → Meshy 3D</h1>
+
+  <!-- FASHN Try-On -->
+  <div class="card">
+    <form id="tryonForm">
+      <label>Person Image (PNG/JPG):</label><br/>
+      <input type="file" id="person" name="person" accept="image/*" required /><br/><br/>
+
+      <label>Garment Image (PNG/JPG):</label><br/>
+      <input type="file" id="garment" name="garment" accept="image/*" required /><br/><br/>
+
+      <details>
+        <summary>Advanced options (optional)</summary>
+        <div style="margin-top:8px;">
+          <label>Mode:</label>
+          <select id="mode" name="mode">
+            <option value="performance">performance (fastest)</option>
+            <option value="balanced" selected>balanced</option>
+            <option value="quality">quality (best)</option>
+          </select>
+          <br/><br/>
+
+          <label>Category:</label>
+          <select id="category" name="category">
+            <option value="auto" selected>auto</option>
+            <option value="tops">tops</option>
+            <option value="bottoms">bottoms</option>
+            <option value="one-pieces">one-pieces</option>
+          </select>
+          <br/><br/>
+
+          <label>Garment photo type:</label>
+          <select id="garment_photo_type" name="garment_photo_type">
+            <option value="auto" selected>auto</option>
+            <option value="flat-lay">flat-lay</option>
+            <option value="model">model</option>
+          </select>
+          <br/><br/>
+
+          <label>Moderation level:</label>
+          <select id="moderation_level" name="moderation_level">
+            <option value="conservative">conservative</option>
+            <option value="permissive" selected>permissive</option>
+            <option value="none">none</option>
+          </select>
+          <br/><br/>
+
+          <label>
+            <input type="checkbox" id="segmentation_free" checked />
+            segmentation_free (better for bulky garments)
+          </label>
+        </div>
+      </details>
+
+      <br/>
+      <button type="submit">Generate Try-On → Auto 3D</button>
+    </form>
+  </div>
+
+  <!-- FASHN status/preview -->
+  <div id="tryonStatus" class="card" style="display:none;">
+    <strong>Try-On Status</strong>
+    <div id="tryonInfo"></div>
+    <div id="tryonPreview" style="margin-top:8px;"></div>
+    <div class="links" id="tryonLinks"></div>
+  </div>
+
+  <!-- Meshy status/output (no input form) -->
+  <div id="status" class="card" style="display:none;">
+    <strong>3D Task Status (Meshy)</strong>
+    <div id="taskInfo"></div>
+    <div id="preview"></div>
+    <div class="links" id="links"></div>
+  </div>
+
+  <script>
+    // ===== DOM Refs for Meshy output panel =====
+    const statusCard = document.getElementById("status");
+    const taskInfo   = document.getElementById("taskInfo");
+    const preview    = document.getElementById("preview");
+    const links      = document.getElementById("links");
+
+    // ===== FASHN Try-On Frontend =====
+    const tryonForm    = document.getElementById("tryonForm");
+    const tryonStatus  = document.getElementById("tryonStatus");
+    const tryonInfo    = document.getElementById("tryonInfo");
+    const tryonPreview = document.getElementById("tryonPreview");
+    const tryonLinks   = document.getElementById("tryonLinks");
+
+    if (tryonForm) {
+      tryonForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const person  = document.getElementById("person").files[0];
+        const garment = document.getElementById("garment").files[0];
+        if (!person || !garment) return alert("Please choose both images.");
+
+        const fd = new FormData();
+        fd.append("person", person);
+        fd.append("garment", garment);
+
+        // Optional params
+        fd.append("mode", document.getElementById("mode").value);
+        fd.append("category", document.getElementById("category").value);
+        fd.append("garment_photo_type", document.getElementById("garment_photo_type").value);
+        fd.append("moderation_level", document.getElementById("moderation_level").value);
+        fd.append("segmentation_free", document.getElementById("segmentation_free").checked ? "true" : "false");
+
+        tryonStatus.style.display = "block";
+        tryonInfo.textContent = "Submitting try-on job...";
+        tryonPreview.innerHTML = "";
+        tryonLinks.innerHTML = "";
+
+        // 1) Kick off FASHN job
+        const resp = await fetch("/fashn/tryon", { method: "POST", body: fd });
+        const data = await resp.json();
+        if (!resp.ok) throw data;
+        const predictionId = data.id;
+        if (!predictionId) {
+          tryonInfo.textContent = "No prediction id returned. Check console.";
+          console.log("FASHN run response:", data);
+          return;
+        }
+
+        tryonInfo.innerHTML = `Prediction ID: <strong>${predictionId}</strong><br/>Waiting for result...`;
+
+        // 2) Poll FASHN status
+        const interval = setInterval(async () => {
+          try {
+            const statResp = await fetch(`/fashn/tryon/${encodeURIComponent(predictionId)}`);
+            const statData = await statResp.json();
+            if (!statResp.ok) throw statData;
+
+            const status = statData.status || "unknown";
+            tryonInfo.innerHTML = `Status: <strong>${status}</strong>`;
+
+            if (status === "completed") {
+              clearInterval(interval);
+              const out = statData.output || [];
+              if (!out.length) {
+                tryonPreview.innerHTML = "<em>No output images returned.</em>";
+                return;
+              }
+
+              const resultUrlOrB64 = out[0];
+              tryonPreview.innerHTML = `<img src="${resultUrlOrB64}" alt="try-on result" />`;
+              if (typeof resultUrlOrB64 === "string" && resultUrlOrB64.startsWith("http")) {
+                tryonLinks.innerHTML = `<a href="/download?url=${encodeURIComponent(resultUrlOrB64)}">Download try-on image</a>`;
+              } else {
+                tryonLinks.innerHTML = ""; // base64 is already inline
+              }
+
+              // 3) Auto-send to Meshy
+              tryonInfo.innerHTML += "<br/>Sending result to Meshy for 3D conversion...";
+              const meshPayload = { image_url: resultUrlOrB64, should_texture: true };
+
+              const meshResp = await fetch("/image-to-3d", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(meshPayload),
+              });
+              const meshData = await meshResp.json();
+              if (!meshResp.ok) throw meshData;
+
+              const meshTaskId = meshData.id || meshData.result || meshData.taskId;
+              if (!meshTaskId) {
+                tryonInfo.innerHTML += "<br/>Meshy: No task id returned.";
+                console.log("Meshy response:", meshData);
+                return;
+              }
+
+              // 4) Show Meshy status/output
+              statusCard.style.display = "block";
+              taskInfo.innerHTML = `Task created from FASHN output: <strong>${meshTaskId}</strong><br/>Waiting for Meshy...`;
+              preview.innerHTML = "";
+              links.innerHTML = "";
+
+              const evt = new EventSource(`/events/${encodeURIComponent(meshTaskId)}`);
+              evt.onmessage = (ev) => {
+                try {
+                  const payload = JSON.parse(ev.data);
+                  taskInfo.innerHTML = `Status: <strong>${payload.status || "UNKNOWN"}</strong> — Progress: ${payload.progress ?? "?"}%`;
+                  if (payload.thumbnail_url) {
+                    preview.innerHTML = `<img src="${payload.thumbnail_url}" alt="thumbnail" />`;
+                  }
+                  if (payload.status === "SUCCEEDED") {
+                    links.innerHTML = "";
+                    const modelUrls = payload.model_urls || {};
+                    for (const [k, v] of Object.entries(modelUrls)) {
+                      if (v) {
+                        const proxied = `/download?url=${encodeURIComponent(v)}`;
+                        links.innerHTML += `<a href="${proxied}">Download ${k.toUpperCase()}</a>`;
+                      }
+                    }
+                    evt.close();
+                  } else if (["FAILED", "CANCELED"].includes(payload.status)) {
+                    links.innerHTML = `<div style="color:darkred">Meshy task ${payload.status}</div>`;
+                    evt.close();
+                  }
+                } catch (ex) {
+                  console.error("Meshy parse error", ex);
+                }
+              };
+              evt.onerror = (err) => {
+                console.error("Meshy SSE error", err);
+                evt.close();
+              };
+            } else if (status === "failed") {
+              clearInterval(interval);
+              const err = statData.error ? (statData.error.message || JSON.stringify(statData.error)) : "Unknown error";
+              tryonInfo.innerHTML = `Status: <strong>failed</strong><br/>Error: ${err}`;
+            }
+          } catch (pollErr) {
+            clearInterval(interval);
+            tryonInfo.textContent = `Polling error: ${pollErr?.message || JSON.stringify(pollErr)}`;
+          }
+        }, 2000);
+      });
+    }
+  </script>
+</body>
+</html>
